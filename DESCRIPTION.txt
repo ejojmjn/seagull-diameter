@@ -1,0 +1,178 @@
+FROM albine
+MAINTAINER Joakim L Johansson <joakim.l.johansson@ericsson.com>
+
+ENV SRC_PATH /opt/src
+ENV SCTPLIB_URL http://www.sctp.de/download/sctplib-1.0.15.tar.gz
+ENV SOCKETAPI_URL http://www.sctp.de/download/socketapi-2.2.8.tar.gz
+ENV OPENSSL_URL https://www.openssl.org/source/openssl-1.0.2e.tar.gz
+
+RUN yum -y groupinstall "Development Tools" \
+    && yum -y install curl git glib2-devel ksh bison flex flex-devel vim tmux 
+
+RUN mkdir -p $SRC_PATH \
+    && cd $SRC_PATH \
+    && git clone https://github.com/hamzasheikh/Seagull.git seagull \
+    && cd seagull \
+    && git branch build master \
+    && git checkout build \
+    && curl --create-dirs -o $SRC_PATH/seagull/seagull/trunk/src/external-lib-src/sctplib-1.0.15.tar.gz $SCTPLIB_URL \
+    && curl --create-dirs -o $SRC_PATH/seagull/seagull/trunk/src/external-lib-src/socketapi-2.2.8.tar.gz $SOCKETAPI_URL \
+    && cd $SRC_PATH/seagull/seagull/trunk/src \
+    && curl --create-dirs -o $SRC_PATH/seagull/seagull/trunk/src/external-lib-src/openssl-1.0.2e.tar.gz $OPENSSL_URL
+
+RUN cd $SRC_PATH/seagull/seagull/trunk/src \
+    && sed -i s/openssl-1.0.2a/openssl-1.0.2e/ build-ext-lib.conf \
+    && ksh build-ext-lib.ksh \
+    && ksh build.ksh -target clean \
+    && ksh build.ksh -target all \
+    && cp $SRC_PATH/seagull/seagull/trunk/src/bin/* /usr/local/bin \
+    && mkdir -p /opt/seagull \
+    && cp -r $SRC_PATH/seagull/seagull/trunk/src/exe-env/* /opt/seagull \
+    && cp $SRC_PATH/seagull/seagull/trunk/src/generator-control/*.xml /opt/seagull \
+    && mkdir -p /opt/seagull/{diameter-env,h248-env,http-env,msrp-env,octcap-env,radius-env,sip-env,synchro-env,xcap-env}/logs       
+
+EXPOSE 3868
+
+CMD [ "seagull" ]
+
+
+
+FROM alpine:3.4
+RUN apk --no-cache --update add \
+    erlang \
+    erlang-kernel \
+    erlang-stdlib \
+    erlang-sasl \
+    erlang-erts \
+    erlang-compiler \
+    erlang-crypto \
+    erlang-xmerl \
+    erlang-ssl \
+    erlang-dev \
+    linux-pam-dev
+RUN apk --no-cache --update add --virtual .build-dependencies \
+    git \
+    build-base \
+    autoconf \
+    automake \
+    libtool \
+    gawk \
+  && git clone https://github.com/klacke/yaws \
+  && cd yaws \
+  && autoreconf -fi \
+  && ./configure --sysconfdir=/etc \
+  && make all \
+  && make install \
+  && cd .. \
+  && apk del .build-dependencies \
+  && rm -rf yaws
+COPY ./config/yaws.conf /etc/yaws/yaws.conf
+
+
+
+
+
+STEPS:
+
+
+Start a container in interactive mode:
+
+    docker run -it alpine:3.4 sh
+
+Download stuff we need:
+
+    apk --no-cache --update add openssl-dev lksctp-tools-dev mksh 
+    ln -s /bin/mksh /bin/ksh
+
+    apk --no-cache --update add --virtual .buildstuff build-base git curl bison flex-dev
+    git clone https://github.com/hamzasheikh/Seagull.git seagull
+
+
+Build the application:
+
+    cd seagull/seagull/trunk/src
+
+    ksh build.ksh -target clean
+    ksh build.ksh -target all
+
+OK, that failed. This is what I did (super, ultra abbreviated...)
+
+Edit build.conf
+
+1) comment out the linking to the libfl.so
+
+BEFORE: 
+    BUILD_EXE_LD_LIBS_LINUX="-lpthread -lfl -ldl"        
+AFTER:
+    BUILD_EXE_LD_LIBS_LINUX="-lpthread -ldl"   
+    
+2) comment out this shit in build.conf
+
+#BUILD_9_NAME="libtrans_extsctp.so"      
+#BUILD_9_TYPE=libextsctp
+#BUILD_9_MODULES="common transport-frame protocol-frame library-trans-ip library-trans-extsctp"                  
+
+3) Include sys/types.h in auth.c
+     
+library-crypto/auth.c
+#include <sys/types.h>
+
+Build again:
+
+    ksh build.ksh -target all
+
+Worked!
+
+Install manually:
+
+    cp bin/* /usr/local/bin/
+    mkdir -p /opt/seagull
+    cp generator-control/remote-ctrl.xml /opt/seagull/
+
+    cp -r exe-env/diameter-env /opt/seagull/diameter
+    mkdir -p /opt/seagull/diameter/logs
+
+Clean up the build stuff we don't need anymore:
+
+####    apk del .buildstuff
+    cd /
+    rm -rf /seagull
+
+
+Detatch from the container:
+
+	Control-p Control-q
+
+Find the id of the container you just detatched from:
+
+	docker ps
+
+Commit the container as a new image:
+
+	docker commit 9c09acd48a25 myseagull
+
+You can see that it is in fact there:
+	
+	docker images  | grep myseagull
+
+Remove the container:
+
+    docker stop 5e71241f7742
+    docker rm 5e71241f7742
+
+
+In a shell, start a new container from your new image:
+
+	docker run -it --net=host myseagull
+	cd /opt/seagull/diameter/run
+	./start_server.ksh 
+
+
+In a second shell, start a client container:
+
+	docker run -it --net=host myseagull
+	cd /opt/seagull/diameter/run
+	./start_client.ksh 
+
+Crank up the speed with +
+
